@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Случайный Чат</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for chat messages */
+        .chat-messages-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .chat-messages-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .chat-messages-container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        .chat-messages-container::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center p-4 text-gray-800">
+    <div class="bg-white rounded-xl shadow-2xl p-8 max-w-2xl w-full flex flex-col space-y-6 transform transition-all duration-300">
+        <h1 class="text-4xl font-extrabold text-center text-gray-900 mb-2">Случайный Чат</h1>
+        <p class="text-center text-gray-600 mb-6">Ваш ID: <span id="userIdDisplay" class="font-semibold text-purple-700 break-words">Загрузка...</span></p>
+
+        <!-- Status and Action Buttons -->
+        <div class="flex flex-col items-center space-y-4">
+            <button id="findPartnerBtn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-full shadow-lg transition-all duration-300 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-green-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                Найти Собеседника
+            </button>
+
+            <button id="disconnectChatBtn" class="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-full shadow-lg transition-all duration-300 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-red-300 hidden">
+                Отключиться
+            </button>
+
+            <p id="statusMessage" class="text-center text-sm font-medium text-gray-700 mt-2">Ожидание подключения...</p>
+        </div>
+
+        <!-- Chat Area -->
+        <div id="chatArea" class="border border-gray-200 rounded-lg p-4 bg-gray-50 h-96 overflow-y-auto flex flex-col space-y-3 shadow-inner hidden chat-messages-container">
+            <p class="text-center text-sm text-gray-500 mb-2 border-b pb-2">
+                Вы в чате с: <span id="partnerIdDisplay" class="font-semibold break-words"></span>
+            </p>
+            <div id="messagesContainer" class="flex-grow flex flex-col space-y-3">
+                <p id="noMessagesPlaceholder" class="text-center text-gray-500 italic mt-auto mb-auto">Начните общение!</p>
+            </div>
+            <div id="messagesEndRef"></div> <!-- For auto-scrolling -->
+        </div>
+
+        <!-- Message Input -->
+        <div id="messageInputArea" class="flex space-x-3 mt-4 hidden">
+            <input
+                type="text"
+                id="messageInput"
+                placeholder="Введите сообщение..."
+                class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
+            />
+            <button
+                id="sendMessageBtn"
+                class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition-all duration-300 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-purple-300"
+            >
+                Отправить
+            </button>
+        </div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? initialAuthToken : null; // Corrected variable name
+
+        // Firebase instances
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+        let currentChatSessionId = null;
+        let partnerUserId = null;
+
+        // DOM Elements
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const statusMessageDisplay = document.getElementById('statusMessage');
+        const findPartnerBtn = document.getElementById('findPartnerBtn');
+        const disconnectChatBtn = document.getElementById('disconnectChatBtn');
+        const chatArea = document.getElementById('chatArea');
+        const messagesContainer = document.getElementById('messagesContainer');
+        const messageInputArea = document.getElementById('messageInputArea');
+        const messageInput = document.getElementById('messageInput');
+        const sendMessageBtn = document.getElementById('sendMessageBtn');
+        const partnerIdDisplay = document.getElementById('partnerIdDisplay');
+        const noMessagesPlaceholder = document.getElementById('noMessagesPlaceholder');
+        const messagesEndRef = document.getElementById('messagesEndRef');
+
+        // Unsubscribe functions for Firebase listeners
+        let unsubscribeAuth = null;
+        let unsubscribeChatSession = null;
+        let unsubscribeMessages = null;
+
+        // --- Utility Functions ---
+
+        function updateStatus(message) {
+            statusMessageDisplay.textContent = message;
+        }
+
+        function scrollToBottom() {
+            messagesEndRef.scrollIntoView({ behavior: "smooth" });
+        }
+
+        function showChatUI(show) {
+            if (show) {
+                chatArea.classList.remove('hidden');
+                messageInputArea.classList.remove('hidden');
+                findPartnerBtn.classList.add('hidden');
+                disconnectChatBtn.classList.remove('hidden');
+            } else {
+                chatArea.classList.add('hidden');
+                messageInputArea.classList.add('hidden');
+                findPartnerBtn.classList.remove('hidden');
+                disconnectChatBtn.classList.add('hidden');
+            }
+        }
+
+        function addMessageToDisplay(messageData, currentUserId) {
+            const messageElement = document.createElement('div');
+            messageElement.className = `flex ${messageData.senderId === currentUserId ? 'justify-end' : 'justify-start'}`;
+
+            const messageBubble = document.createElement('div');
+            messageBubble.className = `max-w-[70%] p-3 rounded-lg shadow-md ${
+                messageData.senderId === currentUserId
+                    ? 'bg-blue-500 text-white rounded-br-none'
+                    : 'bg-gray-200 text-gray-800 rounded-bl-none'
+            }`;
+
+            const messageText = document.createElement('p');
+            messageText.className = 'text-sm break-words';
+            messageText.textContent = messageData.message;
+
+            const messageTimestamp = document.createElement('span');
+            messageTimestamp.className = 'block text-xs mt-1 opacity-75';
+            messageTimestamp.textContent = messageData.timestamp ? new Date(messageData.timestamp.toMillis()).toLocaleTimeString() : '';
+
+            messageBubble.appendChild(messageText);
+            messageBubble.appendChild(messageTimestamp);
+            messageElement.appendChild(messageBubble);
+
+            messagesContainer.appendChild(messageElement);
+            scrollToBottom();
+        }
+
+        function clearMessagesDisplay() {
+            messagesContainer.innerHTML = ''; // Clear all messages
+            messagesContainer.appendChild(noMessagesPlaceholder); // Add placeholder back
+            noMessagesPlaceholder.classList.remove('hidden'); // Ensure placeholder is visible
+        }
+
+        // --- Firebase Functions ---
+
+        async function authenticateFirebase() {
+            try {
+                // Use initialAuthToken if provided, otherwise sign in anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase authentication failed:", error);
+                updateStatus('Ошибка аутентификации Firebase.');
+            }
+        }
+
+        async function findPartner() {
+            if (!userId || !db || !isAuthReady) {
+                updateStatus('Подождите, идет инициализация...');
+                return;
+            }
+
+            updateStatus('Поиск собеседника...');
+            findPartnerBtn.disabled = true; // Disable button during search
+            console.log("Finding partner for user:", userId);
+
+            try {
+                const onlineUsersRef = collection(db, `artifacts/${appId}/public/data/onlineUsers`);
+
+                // Check if current user is already in onlineUsers collection, remove and re-add to ensure fresh status.
+                const userDocRef = doc(onlineUsersRef, userId);
+                const userDocSnap = await getDoc(userDocRef);
+
+                if (userDocSnap.exists()) {
+                    console.log("User already in onlineUsers collection, removing and re-adding to ensure fresh status.");
+                    await deleteDoc(userDocRef);
+                }
+
+                // Add current user to onlineUsers
+                await setDoc(userDocRef, {
+                    userId: userId,
+                    timestamp: serverTimestamp(),
+                    lookingForChat: true
+                });
+                console.log("User added to onlineUsers:", userId);
+
+                // Look for another online user
+                const q = query(onlineUsersRef, where('userId', '!=', userId), where('lookingForChat', '==', true));
+                const onlineUsersSnapshot = await getDocs(q);
+
+                let foundPartnerId = null;
+                onlineUsersSnapshot.forEach((d) => {
+                    if (!foundPartnerId && d.id !== userId) { // Ensure not matching with self
+                        foundPartnerId = d.id;
+                    }
+                });
+
+                if (foundPartnerId) {
+                    console.log("Partner found:", foundPartnerId);
+                    updateStatus('Собеседник найден! Установка соединения...');
+
+                    // Try to create a new chat session
+                    // Ensure the chat session ID is consistent regardless of who initiates
+                    const participantsSorted = [userId, foundPartnerId].sort();
+                    const chatSessionDocId = `${participantsSorted[0]}_${participantsSorted[1]}`;
+                    const chatSessionRef = doc(db, `artifacts/${appId}/public/data/chatSessions`, chatSessionDocId);
+
+                    await setDoc(chatSessionRef, {
+                        participants: [userId, foundPartnerId],
+                        createdAt: serverTimestamp(),
+                        active: true
+                    }, { merge: true }); // Use merge to prevent overwriting if somehow created concurrently
+
+                    // Remove both users from onlineUsers
+                    await deleteDoc(doc(onlineUsersRef, userId));
+                    await deleteDoc(doc(onlineUsersRef, foundPartnerId));
+
+                    // Status will be updated by the onSnapshot listener for chat sessions
+                } else {
+                    updateStatus('Ожидание собеседника...');
+                    console.log("No partner found, waiting...");
+                }
+            } catch (error) {
+                console.error("Error finding partner:", error);
+                updateStatus('Ошибка при поиске собеседника.');
+            } finally {
+                findPartnerBtn.disabled = false; // Re-enable button
+            }
+        }
+
+        async function sendMessage() {
+            if (!messageInput.value.trim() || !currentChatSessionId || !userId) {
+                return;
+            }
+
+            try {
+                const messagesCollectionRef = collection(db, `artifacts/${appId}/public/data/chatSessions/${currentChatSessionId}/messages`);
+                await addDoc(messagesCollectionRef, {
+                    senderId: userId,
+                    message: messageInput.value,
+                    timestamp: serverTimestamp(),
+                });
+                messageInput.value = ''; // Clear input
+            } catch (error) {
+                console.error("Error sending message:", error);
+                updateStatus('Ошибка при отправке сообщения.');
+            }
+        }
+
+        async function disconnectChat() {
+            if (!currentChatSessionId || !userId) return;
+
+            try {
+                const chatSessionDocRef = doc(db, `artifacts/${appId}/public/data/chatSessions`, currentChatSessionId);
+                // Set the session to inactive instead of deleting to prevent issues if partner is still connected
+                await updateDoc(chatSessionDocRef, { active: false });
+
+                // Clean up local state
+                currentChatSessionId = null;
+                partnerUserId = null;
+                clearMessagesDisplay();
+                updateStatus('Вы отключились. Нажмите "Найти Собеседника" снова.');
+                showChatUI(false); // Hide chat UI, show find partner button
+
+                console.log("Disconnected from chat:", currentChatSessionId);
+            } catch (error) {
+                console.error("Error disconnecting chat:", error);
+                updateStatus('Ошибка при отключении от чата.');
+            }
+        }
+
+        // --- Event Listeners ---
+
+        findPartnerBtn.addEventListener('click', findPartner);
+        disconnectChatBtn.addEventListener('click', disconnectChat);
+        sendMessageBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // --- Initialization on Window Load ---
+        window.onload = function () {
+            // Initialize Firebase
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                updateStatus('Инициализация Firebase...');
+            } catch (error) {
+                console.error("Failed to initialize Firebase:", error);
+                updateStatus('Ошибка: Firebase не инициализирован. Проверьте конфигурацию.');
+                return;
+            }
+
+            // Authenticate Firebase user
+            authenticateFirebase();
+
+            // Set up authentication state listener
+            unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+                // Use uid if available, otherwise generate a random ID for unauthenticated users
+                userId = currentUser?.uid || crypto.randomUUID();
+                userIdDisplay.textContent = userId;
+                isAuthReady = true;
+                updateStatus('Нажмите "Найти Собеседника" для начала.');
+                findPartnerBtn.disabled = false; // Enable find partner button
+
+                // Set up listener for current user's active chat session
+                const chatSessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/chatSessions`);
+                // Query for sessions where this user is a participant AND the session is active
+                const qChatSessions = query(chatSessionsCollectionRef,
+                    where('participants', 'array-contains', userId),
+                    where('active', '==', true) // Only look for active sessions
+                );
+
+                unsubscribeChatSession = onSnapshot(qChatSessions, (snapshot) => {
+                    let activeSessionFound = null;
+                    snapshot.forEach((d) => {
+                        const sessionData = d.data();
+                        // Verify that the session is active and has two participants (including current user)
+                        if (sessionData.participants && sessionData.participants.length === 2 &&
+                            sessionData.participants.includes(userId) && sessionData.active) {
+                            activeSessionFound = { id: d.id, ...sessionData };
+                            partnerUserId = sessionData.participants.find(p => p !== userId);
+                        }
+                    });
+
+                    if (activeSessionFound) {
+                        if (currentChatSessionId !== activeSessionFound.id) { // Only update if session changed
+                            currentChatSessionId = activeSessionFound.id;
+                            partnerIdDisplay.textContent = partnerUserId;
+                            updateStatus('Вы подключены к собеседнику.');
+                            showChatUI(true); // Show chat UI
+                            clearMessagesDisplay(); // Clear old messages
+
+                            // Stop previous message listener if any
+                            if (unsubscribeMessages) {
+                                unsubscribeMessages();
+                            }
+
+                            // Set up new message listener for the active session
+                            const messagesCollectionRef = collection(db, `artifacts/${appId}/public/data/chatSessions/${currentChatSessionId}/messages`);
+                            const qMessages = query(messagesCollectionRef);
+
+                            unsubscribeMessages = onSnapshot(qMessages, (messagesSnapshot) => {
+                                // Clear current messages and re-render
+                                messagesContainer.innerHTML = '';
+                                if (messagesSnapshot.empty) {
+                                    noMessagesPlaceholder.classList.remove('hidden');
+                                    messagesContainer.appendChild(noMessagesPlaceholder);
+                                } else {
+                                    noMessagesPlaceholder.classList.add('hidden'); // Hide placeholder if messages exist
+                                    const loadedMessages = messagesSnapshot.docs.map(d => ({
+                                        id: d.id,
+                                        ...d.data()
+                                    })).sort((a, b) => (a.timestamp?.toMillis() || 0) - (b.timestamp?.toMillis() || 0));
+
+                                    loadedMessages.forEach(msg => addMessageToDisplay(msg, userId));
+                                }
+                                scrollToBottom();
+                            }, (error) => {
+                                console.error("Error listening to messages:", error);
+                                updateStatus('Ошибка загрузки сообщений.');
+                            });
+                        }
+                    } else {
+                        // No active session found for the user
+                        if (currentChatSessionId) { // If there was a previous session, it means it became inactive
+                            updateStatus('Собеседник отключился. Нажмите "Найти Собеседника" снова.');
+                            // No need to call disconnectChat here, as the session is already inactive/deleted
+                        } else {
+                            updateStatus('Нажмите "Найти Собеседника" для начала.');
+                        }
+                        showChatUI(false); // Hide chat UI if no session
+                        clearMessagesDisplay();
+                        if (unsubscribeMessages) {
+                            unsubscribeMessages(); // Stop listening to messages if no session
+                        }
+                        currentChatSessionId = null;
+                        partnerUserId = null;
+                    }
+                }, (error) => {
+                    console.error("Error listening to chat sessions:", error);
+                    updateStatus('Ошибка при поиске чат-сессий.');
+                });
+            }, (error) => {
+                console.error("Auth state change error:", error);
+                updateStatus('Ошибка при изменении состояния аутентификации.');
+            });
+        };
+
+        // Cleanup on window unload (optional, but good practice for real apps)
+        window.onbeforeunload = function() {
+            if (unsubscribeAuth) unsubscribeAuth();
+            if (unsubscribeChatSession) unsubscribeChatSession();
+            if (unsubscribeMessages) unsubscribeMessages();
+            // Consider removing user from onlineUsers collection here if necessary,
+            // but this can be unreliable due to browser quirks.
+            // Firebase Firestore's TTL (Time-To-Live) or last_seen timestamps are better for this.
+        };
+
+    </script>
+</body>
+</html>
